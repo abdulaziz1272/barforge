@@ -1121,7 +1121,7 @@ const totalSaved = computed(() => saved.value.length)
         :class="{ active: view === 'history' }"
         @click="view = 'history'"
       >
-        <span style="font-size: 35px;">◷</span>
+        <span>◴</span>
         Buyurtmalar
       </button>
 

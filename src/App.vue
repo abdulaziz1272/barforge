@@ -5,6 +5,7 @@ import specs from './specs.json'
 import { PDFDocument, rgb } from 'pdf-lib'
 import fontkit from '@pdf-lib/fontkit'
 import pdfFontUrl from './assets/DejaVuSans.ttf?url'
+import logo from '../public/icon-512.png'
 
 const STORE = 'barforge-orders-v1'
 const WEIGHTS = [2.5, 2, 1.5, 1]
@@ -455,7 +456,7 @@ const totalSaved = computed(() => saved.value.length)
   <div class="app-shell">
     <aside class="sidebar">
       <div class="brand">
-        <span class="brand-icon">▥</span>
+        <span class="brand-icon"><img :src="logo" alt="" style="width: 50px;"></span>
         <div>
           <strong>Alyans sport</strong>
           <small>Ishlab chiqarish</small>

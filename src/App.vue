@@ -627,7 +627,7 @@ const totalSaved = computed(() => saved.value.length)
               <template v-else>
                 <p class="muted">Quyma toshlar bir butun bo‘lib tayyorlanadi, yig‘ish qismlari kerak emas.</p>
                 <div class="full-list">
-                  <div v-for="w in usedQuymaWeights" :key="w" class="full-row">
+                  <div v-for="w in QUYMA_WEIGHTS" :key="w" class="full-row">
                     <div><strong>{{ w }} kg</strong><small>Bir butun quyma tosh</small></div>
                     <input :aria-label="`Soni: ${w} kg quyma`" type="number" min="0"
                       max="1000000" step="1" :value="getQty('quyma', w)"

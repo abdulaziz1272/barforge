@@ -7,7 +7,7 @@ export default defineConfig({
     registerType: 'autoUpdate',
     includeAssets: ['favicon.svg'],
     manifest: {
-      name: 'BarForge — Ishlab chiqarish hisoblagichi', short_name: 'BarForge',
+      name: 'Alyans sport', short_name: 'Alyans sport',
       description: 'Shtanga tosh qismlarini hisoblash dasturi',
       theme_color: '#14243a', background_color: '#f4f6fa',
       display: 'standalone', start_url: '/',

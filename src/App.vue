@@ -271,6 +271,10 @@ async function downloadPDF(
     const pdf = await PDFDocument.create()
     pdf.registerFontkit(fontkit)
 
+    // Use the same Alyans Sport icon shown in the application.
+    const logoBytes = await (await fetch(logo)).arrayBuffer()
+    const pdfLogo = await pdf.embedPng(logoBytes)
+
     const fontBytes = await (
       await fetch(pdfFontUrl)
     ).arrayBuffer()
@@ -365,8 +369,15 @@ async function downloadPDF(
 
     // Header and order identity.
     page.drawRectangle({ x: 0, y: 745, width: W, height: 96, color: navy })
-    text('Alyans sport', margin, 801, 22, white)
-    text('ISHLAB CHIQARISH HISOBOTI', margin, 778, 10, rgb(0.75, 0.85, 0.96))
+    const logoSize = 57
+    page.drawImage(pdfLogo, {
+      x: margin,
+      y: 764,
+      width: logoSize,
+      height: logoSize
+    })
+    text('Alyans sport', margin + 70, 801, 22, white)
+    text('ISHLAB CHIQARISH HISOBOTI', margin + 70, 778, 10, rgb(0.75, 0.85, 0.96))
     right(new Date().toLocaleDateString('uz-UZ'), W - margin, 802, 9, white)
     y = 725
     text('BUYURTMA', margin, y, 8, accent)

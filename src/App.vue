@@ -8,13 +8,22 @@ import pdfFontUrl from './assets/DejaVuSans.ttf?url'
 
 const STORE = 'barforge-orders-v1'
 const WEIGHTS = [2.5, 2, 1.5, 1]
+const QUYMA_WEIGHTS = [0.5, 1, 2, 2.5, 5, 7.5, 10, 15, 20]
+// Change these defaults whenever necessary (UZS per kilogram).
+const DEFAULT_STANDARD_PRICE = 10000
+const DEFAULT_QUYMA_PRICE = 12000
+const standardPrice = ref(DEFAULT_STANDARD_PRICE)
+const quymaPrice = ref(DEFAULT_QUYMA_PRICE)
+const fmt = n => Number(n || 0).toLocaleString('uz-UZ')
+const validPrice = v => Number.isFinite(Number(v)) && Number(v) >= 0
+const kindOf = x => x.type === 'quyma' ? 'quyma' : 'standard'
+const keyOf = (type, weight) => `${type}:${weight}`
+
 
 const view = ref('calculator')
-const mode = ref('quick')
+const mode = ref('standard')
 const search = ref('')
 const specSearch = ref('')
-const selectedWeight = ref(40)
-const selectedQty = ref(1)
 const name = ref('')
 const lines = ref([])
 const saved = ref(loadSaved())
@@ -49,14 +58,23 @@ const fullSpecs = computed(() =>
   specs.filter(s => String(s.weight).includes(search.value.trim()))
 )
 
-const lineItems = computed(() =>
-  lines.value
-    .filter(x => x.qty > 0)
-    .map(x => ({
-      ...x,
-      spec: specs.find(s => s.weight === x.weight)
-    }))
-    .filter(x => x.spec)
+function normalizeItems(items = []) {
+  return items
+    .map(x => {
+      const type = kindOf(x)
+      const weight = Number(x.weight)
+      const qty = validQty(x.qty)
+      const spec = type === 'standard'
+        ? specs.find(s => Number(s.weight) === weight)
+        : null
+      return { type, weight, qty, spec }
+    })
+    .filter(x => x.qty > 0 && (x.type === 'quyma'
+      ? QUYMA_WEIGHTS.includes(x.weight) : Boolean(x.spec)))
+}
+const lineItems = computed(() => normalizeItems(lines.value))
+const usedQuymaWeights = computed(() =>
+  QUYMA_WEIGHTS.filter(w => lineItems.value.some(x => x.type === 'quyma' && x.weight === w))
 )
 
 const barCount = computed(() =>
@@ -70,9 +88,15 @@ function calculateTotalWeight(items) {
   }, 0)
 }
 
-const totalWeight = computed(() =>
-  calculateTotalWeight(lineItems.value)
-)
+function weightFor(items, type) {
+  return calculateTotalWeight(normalizeItems(items).filter(x => x.type === type))
+}
+const standardWeight = computed(() => weightFor(lineItems.value, 'standard'))
+const quymaWeight = computed(() => weightFor(lineItems.value, 'quyma'))
+const totalWeight = computed(() => standardWeight.value + quymaWeight.value)
+const standardAmount = computed(() => standardWeight.value * Number(standardPrice.value || 0))
+const quymaAmount = computed(() => quymaWeight.value * Number(quymaPrice.value || 0))
+const totalAmount = computed(() => standardAmount.value + quymaAmount.value)
 
 function calculate(items) {
   const totals = Object.fromEntries(
@@ -85,8 +109,9 @@ function calculate(items) {
   const rods = {}
 
   for (const item of items) {
+    if (kindOf(item) === 'quyma') continue
     const spec = specs.find(
-      s => s.weight === Number(item.weight)
+      s => Number(s.weight) === Number(item.weight)
     )
 
     const qty = Number(item.qty)
@@ -137,34 +162,27 @@ function validQty(v) {
     : 0
 }
 
-function setQty(weight, value) {
+function setQty(type, weight, value) {
   const qty = validQty(value)
-  const found = lines.value.find(x => x.weight === weight)
-
-  if (found) {
-    found.qty = qty
-  } else if (qty) {
-    lines.value.push({ weight, qty })
+  const found = lines.value.find(x => kindOf(x) === type && Number(x.weight) === Number(weight))
+  if (found) found.qty = qty
+  else if (qty) lines.value.push({ type, weight: Number(weight), qty })
+}
+function getQty(type, weight) {
+  return lines.value.find(x => kindOf(x) === type && Number(x.weight) === Number(weight))?.qty || 0
+}
+function removeLine(type, weight) {
+  lines.value = lines.value.filter(x => !(kindOf(x) === type && Number(x.weight) === Number(weight)))
+}
+function orderPrices(order) {
+  return {
+    standard: Number(order?.prices?.standard ?? DEFAULT_STANDARD_PRICE),
+    quyma: Number(order?.prices?.quyma ?? DEFAULT_QUYMA_PRICE)
   }
 }
-
-function getQty(weight) {
-  return lines.value.find(x => x.weight === weight)?.qty || 0
-}
-
-function addQuick() {
-  const weight = Number(selectedWeight.value)
-
-  setQty(
-    weight,
-    getQty(weight) + validQty(selectedQty.value)
-  )
-
-  notice.value = 'Shtanga buyurtmaga qo‘shildi.'
-}
-
-function removeLine(weight) {
-  lines.value = lines.value.filter(x => x.weight !== weight)
+function orderAmount(order) {
+  const prices = orderPrices(order)
+  return weightFor(order.lines, 'standard') * prices.standard + weightFor(order.lines, 'quyma') * prices.quyma
 }
 
 function clearOrder() {
@@ -176,12 +194,19 @@ function clearOrder() {
   }
 
   lines.value = []
+  standardPrice.value = DEFAULT_STANDARD_PRICE
+  quymaPrice.value = DEFAULT_QUYMA_PRICE
+  mode.value = 'standard'
   name.value = ''
   notice.value = ''
 }
 
 function saveOrder() {
   if (!barCount.value) return
+  if (!validPrice(standardPrice.value) || !validPrice(quymaPrice.value)) {
+    notice.value = 'Narxlar manfiy bo‘lmagan son bo‘lishi kerak.'
+    return
+  }
 
   saved.value.unshift({
     id: crypto.randomUUID
@@ -191,9 +216,9 @@ function saveOrder() {
       name.value.trim() ||
       `Buyurtma ${new Date().toLocaleDateString('uz-UZ')}`,
     date: new Date().toISOString(),
-    lines: lineItems.value.map(({ weight, qty }) => ({
-      weight,
-      qty
+    prices: { standard: Number(standardPrice.value), quyma: Number(quymaPrice.value) },
+    lines: lineItems.value.map(({ type, weight, qty }) => ({
+      type, weight, qty
     }))
   })
 
@@ -201,7 +226,11 @@ function saveOrder() {
 }
 
 function loadOrder(order) {
-  lines.value = order.lines.map(x => ({ ...x }))
+  lines.value = normalizeItems(order.lines).map(({ type, weight, qty }) => ({ type, weight, qty }))
+  const prices = orderPrices(order)
+  standardPrice.value = prices.standard
+  quymaPrice.value = prices.quyma
+  mode.value = 'standard'
   name.value = order.name
   view.value = 'calculator'
 
@@ -222,7 +251,8 @@ function deleteOrder(id) {
 
 async function downloadPDF(
   items = lineItems.value,
-  title = name.value
+  title = name.value,
+  prices = { standard: Number(standardPrice.value), quyma: Number(quymaPrice.value) }
 ) {
   if (!items.length) {
     notice.value = 'PDF uchun avval shtangalarni kiriting.'
@@ -230,8 +260,12 @@ async function downloadPDF(
   }
 
   try {
+    items = normalizeItems(items)
     const { totals, rods } = calculate(items)
-    const weight = calculateTotalWeight(items)
+    const stdWeight = weightFor(items, 'standard')
+    const castWeight = weightFor(items, 'quyma')
+    const weight = stdWeight + castWeight
+    const amount = stdWeight * prices.standard + castWeight * prices.quyma
 
     const pdf = await PDFDocument.create()
     pdf.registerFontkit(fontkit)
@@ -244,193 +278,147 @@ async function downloadPDF(
       subset: true
     })
 
+    // Clean A4 report with paginated, aligned tables.
     const pageSize = [595.28, 841.89]
+    const W = pageSize[0]
+    const margin = 38
+    const contentW = W - 2 * margin
+    const navy = rgb(0.09, 0.16, 0.27)
+    const muted = rgb(0.36, 0.43, 0.51)
+    const accent = rgb(0.12, 0.39, 0.70)
+    const pale = rgb(0.94, 0.96, 0.985)
+    const border = rgb(0.84, 0.88, 0.92)
+    const white = rgb(1, 1, 1)
     let page = pdf.addPage(pageSize)
-
-    const margin = 42
-    let y = 797
-
-    const navy = rgb(0.10, 0.16, 0.26)
-    const gray = rgb(0.34, 0.40, 0.48)
-    const line = rgb(0.83, 0.87, 0.91)
-
-    const fmt = n => Number(n).toLocaleString('uz-UZ')
-
-    function write(t, x, size = 10, color = navy) {
-      page.drawText(String(t), {
-        x,
-        y,
-        size,
-        font,
-        color
-      })
+    let y = 0
+    let pageNumber = 1
+    const money = n => `${fmt(n)} so‘m`
+    const safe = t => String(t ?? '').replace(/[\r\n]+/g, ' ')
+    function text(t, x, baseline, size = 9, color = navy) {
+      page.drawText(safe(t), { x, y: baseline, size, font, color })
     }
-
-    function next(amount = 20) {
-      y -= amount
-
-      if (y < 70) {
-        page = pdf.addPage(pageSize)
-        y = 797
+    function right(t, x, baseline, size = 9, color = navy) {
+      const str = safe(t)
+      text(str, x - font.widthOfTextAtSize(str, size), baseline, size, color)
+    }
+    function lineAt(yy) {
+      page.drawLine({ start: { x: margin, y: yy }, end: { x: W - margin, y: yy }, color: border, thickness: 0.7 })
+    }
+    function footer() {
+      lineAt(37)
+      text('Alyans sport  •  Ishlab chiqarish hisoboti', margin, 23, 8, muted)
+      right(`Sahifa ${pageNumber}`, W - margin, 23, 8, muted)
+    }
+    function newPage() {
+      footer()
+      page = pdf.addPage(pageSize)
+      pageNumber++
+      y = 785
+      text('Alyans sport  /  HISOBOT DAVOMI', margin, 804, 9, accent)
+      lineAt(794)
+    }
+    function ensure(height) {
+      if (y - height < 55) newPage()
+    }
+    function section(title, columns, widths) {
+      ensure(74)
+      y -= 25
+      text(title, margin, y, 11, navy)
+      y -= 13
+      const top = y
+      page.drawRectangle({ x: margin, y: top - 27, width: contentW, height: 27, color: navy })
+      let x = margin
+      columns.forEach((col, i) => {
+        const last = i === columns.length - 1
+        if (last) right(col, x + widths[i] - 12, top - 18, 8, white)
+        else text(col, x + 11, top - 18, 8, white)
+        x += widths[i]
+      })
+      y = top - 27
+    }
+    function tableRow(cells, widths, opts = {}) {
+      ensure(29)
+      const h = 27
+      if (opts.total) {
+        page.drawRectangle({ x: margin, y: y - h, width: contentW, height: h, color: pale })
+      } else if (opts.shade) {
+        page.drawRectangle({ x: margin, y: y - h, width: contentW, height: h, color: rgb(0.985, 0.99, 1) })
       }
-    }
-
-    function rule() {
-      page.drawLine({
-        start: { x: margin, y: y - 7 },
-        end: { x: 553, y: y - 7 },
-        thickness: 0.6,
-        color: line
-      })
-
-      next(17)
-    }
-
-    function heading(t) {
-      next(12)
-      write(t, margin, 13)
-      next(27)
-    }
-
-    function row(cells, xs, bold = false) {
+      let x = margin
       cells.forEach((cell, i) => {
-        write(
-          cell,
-          xs[i],
-          bold ? 10 : 9,
-          bold ? navy : gray
-        )
+        const last = i === cells.length - 1
+        const size = opts.total ? 9 : 8.5
+        if (last) right(cell, x + widths[i] - 12, y - 18, size, navy)
+        else text(cell, x + 11, y - 18, size, opts.total ? navy : muted)
+        x += widths[i]
       })
-
-      next(22)
-      rule()
+      lineAt(y - h)
+      y -= h
+    }
+    function table(title, headers, widths, rows, totalRow = null) {
+      if (!rows.length) return
+      section(title, headers, widths)
+      rows.forEach((r, i) => tableRow(r, widths, { shade: i % 2 === 1 }))
+      if (totalRow) tableRow(totalRow, widths, { total: true })
     }
 
-    write('BARFORGE', margin, 21)
-    next(30)
+    // Header and order identity.
+    page.drawRectangle({ x: 0, y: 745, width: W, height: 96, color: navy })
+    text('Alyans sport', margin, 801, 22, white)
+    text('ISHLAB CHIQARISH HISOBOTI', margin, 778, 10, rgb(0.75, 0.85, 0.96))
+    right(new Date().toLocaleDateString('uz-UZ'), W - margin, 802, 9, white)
+    y = 725
+    text('BUYURTMA', margin, y, 8, accent)
+    y -= 21
+    const orderName = safe(title || 'Nomsiz buyurtma')
+    const shortName = orderName.length > 65 ? orderName.slice(0, 62) + '...' : orderName
+    text(shortName, margin, y, 13)
+    y -= 21
+    lineAt(y)
+    y -= 26
 
-    write('ISHLAB CHIQARISH HISOBOTI', margin, 14)
-    next(27)
+    // Weight and cost summaries in two tidy tables.
+    const stdQty = items.filter(x => x.type === 'standard').reduce((n, x) => n + x.qty, 0)
+    const castQty = items.filter(x => x.type === 'quyma').reduce((n, x) => n + x.qty, 0)
+    table('OG‘IRLIK VA NARXLAR', ['Turi', 'Soni', 'Og‘irlik', 'Narx / kg', 'Summa'],
+      [145, 67, 90, 100, contentW - 402], [
+        ['Standard', fmt(stdQty), `${fmt(stdWeight)} kg`, money(prices.standard), money(stdWeight * prices.standard)],
+        ['Quyma', fmt(castQty), `${fmt(castWeight)} kg`, money(prices.quyma), money(castWeight * prices.quyma)]
+      ], ['JAMI', fmt(stdQty + castQty), `${fmt(weight)} kg`, '—', money(amount)])
 
-    write(
-      `Buyurtma: ${title || 'Nomsiz buyurtma'}`,
-      margin,
-      10
-    )
-    next(20)
+    const standardItems = items.filter(x => x.type === 'standard').sort((a,b) => b.weight-a.weight)
+    const castItems = items.filter(x => x.type === 'quyma').sort((a,b) => b.weight-a.weight)
+    table('STANDARD SHTANGALAR', ['Og‘irligi', 'Soni', 'Dasta uzunligi', 'Jami kg'],
+      [145, 100, 135, contentW - 380],
+      standardItems.map(x => {
+        const spec = specs.find(s => Number(s.weight) === Number(x.weight))
+        return [`${fmt(x.weight)} kg`, `${fmt(x.qty)} ta`, `${spec?.length ?? '—'} sm`, `${fmt(x.weight * x.qty)} kg`]
+      }), standardItems.length ? ['JAMI', `${fmt(stdQty)} ta`, '', `${fmt(stdWeight)} kg`] : null)
 
-    write(
-      `Sana: ${new Date().toLocaleString('uz-UZ')}`,
-      margin,
-      10
-    )
-    next(20)
+    table('QUYMA TOSHLAR (BIR BUTUN)', ['Og‘irligi', 'Soni', 'Jami og‘irlik'],
+      [190, 145, contentW - 335],
+      castItems.map(x => [`${fmt(x.weight)} kg`, `${fmt(x.qty)} ta`, `${fmt(x.weight*x.qty)} kg`]),
+      castItems.length ? ['JAMI', `${fmt(castQty)} ta`, `${fmt(castWeight)} kg`] : null)
 
-    write(
-      `Jami shtangalar: ${fmt(
-        items.reduce((n, i) => n + Number(i.qty), 0)
-      )} ta`,
-      margin,
-      10
-    )
-    next(20)
-
-    // PDF UCHUN JAMI OG‘IRLIK
-    write(
-      `Jami og‘irlik: ${fmt(weight)} kg`,
-      margin,
-      10
-    )
-
-    heading('SHTANGALAR VA DASTALAR')
-
-    row(
-      ['Og‘irligi', 'Soni', 'Dasta uzunligi'],
-      [margin, 225, 370],
-      true
-    )
-
-    for (const item of [...items].sort(
-      (a, b) => b.weight - a.weight
-    )) {
-      const spec = specs.find(
-        s => s.weight === Number(item.weight)
-      )
-
-      row(
-        [
-          `${item.weight} kg`,
-          `${fmt(item.qty)} ta`,
-          `${spec?.length ?? '—'} sm`
-        ],
-        [margin, 225, 370]
-      )
+    if (standardItems.length) {
+      const partRows = WEIGHTS.map(w => {
+        const t = totals[String(w)]
+        return [`${w} kg`, fmt(t.regular), fmt(t.threaded), fmt(t.regular+t.threaded)]
+      }).filter(r => Number(r[1].replace(/\D/g,'')) + Number(r[2].replace(/\D/g,'')) > 0)
+      const regular = Object.values(totals).reduce((n,t) => n+t.regular,0)
+      const threaded = Object.values(totals).reduce((n,t) => n+t.threaded,0)
+      table('STANDARD UCHUN TOSH QISMLAR', ['Og‘irligi', 'Oddiy', 'Rezbali', 'Jami'],
+        [145, 115, 115, contentW - 375], partRows,
+        ['JAMI', fmt(regular), fmt(threaded), fmt(regular+threaded)])
+      table('KERAKLI DASTALAR', ['Dasta uzunligi', 'Soni'],
+        [contentW/2, contentW/2],
+        Object.entries(rods).filter(([,q]) => q > 0).sort((a,b)=>Number(b[0])-Number(a[0]))
+          .map(([len,qty]) => [`${len} sm`, `${fmt(qty)} ta`]))
     }
-
-    heading('KERAKLI TOSH QISMLAR')
-
-    row(
-      ['Og‘irligi', 'Oddiy', 'Rezbali', 'Jami'],
-      [margin, 170, 305, 445],
-      true
-    )
-
-    let regular = 0
-    let threaded = 0
-
-    for (const w of WEIGHTS) {
-      const t = totals[String(w)]
-
-      regular += t.regular
-      threaded += t.threaded
-
-      row(
-        [
-          `${w} kg`,
-          fmt(t.regular),
-          fmt(t.threaded),
-          fmt(t.regular + t.threaded)
-        ],
-        [margin, 170, 305, 445]
-      )
-    }
-
-    row(
-      [
-        'JAMI',
-        fmt(regular),
-        fmt(threaded),
-        fmt(regular + threaded)
-      ],
-      [margin, 170, 305, 445],
-      true
-    )
-
-    heading('KERAKLI DASTALAR')
-
-    row(
-      ['Dasta uzunligi', 'Soni'],
-      [margin, 305],
-      true
-    )
-
-    for (const [length, qty] of Object.entries(rods).sort(
-      (a, b) => Number(b[0]) - Number(a[0])
-    )) {
-      row(
-        [`${length} sm`, `${fmt(qty)} ta`],
-        [margin, 305]
-      )
-    }
-
-    next(12)
-
-    write(
-      'Har bir shtanga uchun bitta dasta va ikkita rezbali tosh kerak.',
-      margin,
-      9,
-      gray
-    )
+    ensure(42)
+    y -= 22
+    text('Izoh: Quyma toshlar yig‘ilmaydi. Dasta va rezbali qismlar faqat standard uchun.', margin, y, 8, muted)
+    footer()
 
     const bytes = await pdf.save()
 
@@ -443,7 +431,7 @@ async function downloadPDF(
 
     link.href = url
     link.download =
-      `barforge-hisobot-${new Date().toISOString().slice(0, 10)}.pdf`
+      `Alyans sport-hisobot-${new Date().toISOString().slice(0, 10)}.pdf`
 
     document.body.appendChild(link)
     link.click()
@@ -469,7 +457,7 @@ const totalSaved = computed(() => saved.value.length)
       <div class="brand">
         <span class="brand-icon">▥</span>
         <div>
-          <strong>BARFORGE</strong>
+          <strong>Alyans sport</strong>
           <small>Ishlab chiqarish</small>
         </div>
       </div>
@@ -499,7 +487,7 @@ const totalSaved = computed(() => saved.value.length)
       </nav>
 
       <div class="side-note">
-        39 xil shtanga · 2–40 kg
+        39 xil standard shtanga · 9 xil quyma tosh
         <br />
         O‘rnatilgach internetsiz ishlaydi
       </div>
@@ -508,7 +496,7 @@ const totalSaved = computed(() => saved.value.length)
     <div class="main-wrap">
       <header class="topbar">
         <div class="mobile-brand">
-          ▥ <strong>BARFORGE</strong>
+          ▥ <strong>Alyans sport</strong>
         </div>
 
         <span class="topbar-sub">
@@ -560,6 +548,14 @@ const totalSaved = computed(() => saved.value.length)
 
             <!-- YANGI JAMI OG‘IRLIK -->
             <div class="stat">
+              <span>Standard og‘irligi</span>
+              <strong>{{ fmt(standardWeight) }} kg</strong>
+            </div>
+            <div class="stat">
+              <span>Quyma og‘irligi</span>
+              <strong>{{ fmt(quymaWeight) }} kg</strong>
+            </div>
+            <div class="stat">
               <span>Jami og‘irlik</span>
               <strong>
                 {{ totalWeight.toLocaleString('uz-UZ') }}
@@ -589,7 +585,7 @@ const totalSaved = computed(() => saved.value.length)
                 <div>
                   <h2>Buyurtma ma’lumotlari</h2>
                   <p>
-                    39 xil og‘irlikdan istalganini qo‘shing.
+                    Standard shtangalar yoki quyma toshlarni kiriting.
                   </p>
                 </div>
               </div>
@@ -607,101 +603,58 @@ const totalSaved = computed(() => saved.value.length)
               />
 
               <div class="tabs">
-                <button
-                  :class="{ selected: mode === 'quick' }"
-                  @click="mode = 'quick'"
-                >
-                  Tez qo‘shish
+                <button :class="{ selected: mode === 'standard' }" @click="mode = 'standard'">
+                  Standard toshlar
                 </button>
-
-                <button
-                  :class="{ selected: mode === 'full' }"
-                  @click="mode = 'full'"
-                >
-                  Barcha 39 og‘irlik
+                <button :class="{ selected: mode === 'quyma' }" @click="mode = 'quyma'">
+                  Quyma toshlar
                 </button>
               </div>
 
-              <template v-if="mode === 'quick'">
-                <div class="entry-grid">
-                  <div>
-                    <label class="field-label" for="bar-weight">
-                      Shtanga og‘irligi
-                    </label>
-
-                    <select
-                      id="bar-weight"
-                      v-model.number="selectedWeight"
-                      class="text-input"
-                    >
-                      <option
-                        v-for="s in specs"
-                        :key="s.weight"
-                        :value="s.weight"
-                      >
-                        {{ s.weight }} kg · {{ s.length }} sm
-                      </option>
-                    </select>
-                  </div>
-
-                  <div>
-                    <label class="field-label" for="bar-qty">
-                      Soni
-                    </label>
-
-                    <input
-                      id="bar-qty"
-                      v-model.number="selectedQty"
-                      type="number"
-                      min="1"
-                      max="1000000"
-                      step="1"
-                      class="text-input"
-                    />
-                  </div>
-                </div>
-
-                <button
-                  class="btn primary full"
-                  :disabled="validQty(selectedQty) === 0"
-                  @click="addQuick"
-                >
-                  + Buyurtmaga qo‘shish
-                </button>
-              </template>
-
-              <template v-else>
-                <input
-                  v-model="search"
-                  class="text-input"
-                  type="search"
-                  placeholder="Og‘irlikni qidiring, masalan 17"
-                  aria-label="Shtanga og‘irliklarini qidirish"
-                />
-
+              <template v-if="mode === 'standard'">
+                <input v-model="search" class="text-input" type="search"
+                  placeholder="Og‘irlikni qidiring, masalan 17" aria-label="Standard og‘irliklarni qidirish" />
                 <div class="full-list">
-                  <div
-                    v-for="s in fullSpecs"
-                    :key="s.weight"
-                    class="full-row"
-                  >
-                    <div>
-                      <strong>{{ s.weight }} kg</strong>
-                      <small>{{ s.length }} sm dasta</small>
-                    </div>
-
-                    <input
-                      :aria-label="`Soni: ${s.weight} kg shtanga`"
-                      type="number"
-                      min="0"
-                      max="1000000"
-                      step="1"
-                      :value="getQty(s.weight)"
-                      @input="setQty(s.weight, $event.target.value)"
-                    />
+                  <div v-for="s in fullSpecs" :key="s.weight" class="full-row">
+                    <div><strong>{{ s.weight }} kg</strong><small>{{ s.length }} sm dasta</small></div>
+                    <input :aria-label="`Soni: ${s.weight} kg standard`" type="number" min="0"
+                      max="1000000" step="1" :value="getQty('standard', s.weight)"
+                      @input="setQty('standard', s.weight, $event.target.value)" />
                   </div>
                 </div>
               </template>
+              <template v-else>
+                <p class="muted">Quyma toshlar bir butun bo‘lib tayyorlanadi, yig‘ish qismlari kerak emas.</p>
+                <div class="full-list">
+                  <div v-for="w in usedQuymaWeights" :key="w" class="full-row">
+                    <div><strong>{{ w }} kg</strong><small>Bir butun quyma tosh</small></div>
+                    <input :aria-label="`Soni: ${w} kg quyma`" type="number" min="0"
+                      max="1000000" step="1" :value="getQty('quyma', w)"
+                      @input="setQty('quyma', w, $event.target.value)" />
+                  </div>
+                </div>
+              </template>
+
+              <div class="section-divider"></div>
+              <h3>Buyurtma narxlari (so‘m/kg)</h3>
+              <p class="muted">Har bir buyurtma uchun alohida o‘zgartirish mumkin.</p>
+              <div class="entry-grid">
+                <div>
+                  <label class="field-label" for="standard-price">Standard toshlar</label>
+                  <input id="standard-price" v-model.number="standardPrice" type="number"
+                    min="0" step="100" class="text-input" />
+                </div>
+                <div>
+                  <label class="field-label" for="quyma-price">Quyma toshlar</label>
+                  <input id="quyma-price" v-model.number="quymaPrice" type="number"
+                    min="0" step="100" class="text-input" />
+                </div>
+              </div>
+              <div class="info">
+                Standard: {{ fmt(standardWeight) }} kg × {{ fmt(standardPrice) }} = {{ fmt(standardAmount) }} so‘m<br />
+                Quyma: {{ fmt(quymaWeight) }} kg × {{ fmt(quymaPrice) }} = {{ fmt(quymaAmount) }} so‘m<br />
+                <strong>Jami narx: {{ fmt(totalAmount) }} so‘m</strong>
+              </div>
 
               <div class="section-divider"></div>
 
@@ -722,7 +675,7 @@ const totalSaved = computed(() => saved.value.length)
                   v-for="item in [...lineItems].sort(
                     (a, b) => b.weight - a.weight
                   )"
-                  :key="item.weight"
+                  :key="keyOf(item.type, item.weight)"
                   class="order-row"
                 >
                   <div class="weight-bubble">
@@ -731,17 +684,15 @@ const totalSaved = computed(() => saved.value.length)
 
                   <div class="order-description">
                     <strong>
-                      {{ item.weight }} kg shtanga
+                      {{ item.weight }} kg {{ item.type === 'quyma' ? 'quyma tosh' : 'standard shtanga' }}
                     </strong>
 
                     <small>
-                      {{ item.spec.length }} sm ·
-                      {{
-                        Object.entries(item.spec.parts)
-                          .map(([w, n]) => `${n}×${w}`)
-                          .join(' + ')
-                      }}
-                      / tomon
+                      <template v-if="item.type === 'standard'">
+                        {{ item.spec.length }} sm ·
+                        {{ Object.entries(item.spec.parts).map(([w, n]) => `${n}×${w}`).join(' + ') }} / tomon
+                      </template>
+                      <template v-else>Bir butun · yig‘ish talab qilinmaydi</template>
                     </small>
                   </div>
 
@@ -751,13 +702,13 @@ const totalSaved = computed(() => saved.value.length)
                     step="1"
                     :aria-label="`Soni: ${item.weight} kg shtanga`"
                     :value="item.qty"
-                    @input="setQty(item.weight, $event.target.value)"
+                    @input="setQty(item.type, item.weight, $event.target.value)"
                   />
 
                   <button
                     class="icon-button"
                     :aria-label="`O‘chirish: ${item.weight} kg`"
-                    @click="removeLine(item.weight)"
+                    @click="removeLine(item.type, item.weight)"
                   >
                     ×
                   </button>
@@ -770,9 +721,7 @@ const totalSaved = computed(() => saved.value.length)
               <div class="panel-header">
                 <div>
                   <h2>Kerakli qismlar</h2>
-                  <p>
-                    Butun buyurtma uchun toshlar va dastalar soni.
-                  </p>
+                  <p>Standard uchun yig‘ish qismlari, quyma uchun tayyor toshlar.</p>
                 </div>
 
                 <span class="tag">JONLI</span>
@@ -858,6 +807,27 @@ const totalSaved = computed(() => saved.value.length)
                   </table>
                 </div>
 
+                <h3 class="subheading">Quyma toshlar</h3>
+                <div class="table-scroll">
+                  <table>
+                    <thead><tr><th>Og‘irligi</th><th>Soni</th><th>Jami kg</th></tr></thead>
+                    <tbody>
+                      <tr v-for="w in usedQuymaWeights" :key="w">
+                        <td><strong>{{ w }} kg</strong></td>
+                        <td>{{ fmt(getQty('quyma', w)) }}</td>
+                        <td>{{ fmt(w * getQty('quyma', w)) }}</td>
+                      </tr>
+                    </tbody>
+                    <tfoot><tr><td>Jami</td><td>{{ fmt(lineItems.filter(x => x.type === 'quyma').reduce((n,x) => n+x.qty, 0)) }}</td><td>{{ fmt(quymaWeight) }} kg</td></tr></tfoot>
+                  </table>
+                </div>
+                <div class="info">
+                  <strong>Standard: {{ fmt(standardWeight) }} kg</strong> ·
+                  <strong>Quyma: {{ fmt(quymaWeight) }} kg</strong> ·
+                  <strong>Umumiy: {{ fmt(totalWeight) }} kg</strong><br />
+                  <strong>Jami narx: {{ fmt(totalAmount) }} so‘m</strong>
+                </div>
+
                 <h3 class="subheading">
                   Kerakli dastalar
                 </h3>
@@ -881,7 +851,7 @@ const totalSaved = computed(() => saved.value.length)
                 </div>
 
                 <div class="info">
-                  Har bir shtanga uchun 1 ta dasta va
+                  Har bir standard shtanga uchun 1 ta dasta va
                   2 ta rezbali tosh kerak — har tomondagi
                   eng kichik tosh rezbali, qolganlari oddiy.
                 </div>
@@ -973,6 +943,8 @@ const totalSaved = computed(() => saved.value.length)
                     kg
                   </strong>
                 </small>
+                <small>Standard: {{ fmt(weightFor(o.lines, 'standard')) }} kg · Quyma: {{ fmt(weightFor(o.lines, 'quyma')) }} kg</small>
+                <small>Jami narx: <strong>{{ fmt(orderAmount(o)) }} so‘m</strong></small>
               </div>
 
               <div class="history-actions">
@@ -985,7 +957,7 @@ const totalSaved = computed(() => saved.value.length)
 
                 <button
                   class="btn secondary small"
-                  @click="downloadPDF(o.lines, o.name)"
+                  @click="downloadPDF(o.lines, o.name, orderPrices(o))"
                 >
                   PDF yuklab olish
                 </button>
@@ -1102,7 +1074,7 @@ const totalSaved = computed(() => saved.value.length)
       </main>
 
       <footer>
-        BARFORGE · Ishlab chiqarish hisoblagichi ·
+        Alyans sport · Ishlab chiqarish hisoblagichi ·
         Internetsiz ishlaydigan PWA
       </footer>
     </div>

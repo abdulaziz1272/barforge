@@ -9,7 +9,8 @@ import logo from '../public/icon-512.png'
 
 const STORE = 'barforge-orders-v1'
 const WEIGHTS = [2.5, 2, 1.5, 1]
-const QUYMA_WEIGHTS = [0.5, 1, 2, 2.5, 5, 7.5, 10, 15, 20]
+const QUYMA_WEIGHTS = [0.5, 1, 2]
+const BLIN_WEIGHTS = [2.5, 5, 7.5, 10, 15, 20]
 // Change these defaults whenever necessary (UZS per kilogram).
 const DEFAULT_STANDARD_PRICE = 10000
 const DEFAULT_QUYMA_PRICE = 12000
@@ -17,7 +18,13 @@ const standardPrice = ref(DEFAULT_STANDARD_PRICE)
 const quymaPrice = ref(DEFAULT_QUYMA_PRICE)
 const fmt = n => Number(n || 0).toLocaleString('uz-UZ')
 const validPrice = v => Number.isFinite(Number(v)) && Number(v) >= 0
-const kindOf = x => x.type === 'quyma' ? 'quyma' : 'standard'
+// Older orders stored every single-piece weight as 'quyma'.
+// Reclassify weights above 2 kg as Blin without changing the storage key.
+const kindOf = x => {
+  if (x.type === 'blin') return 'blin'
+  if (x.type === 'quyma') return BLIN_WEIGHTS.includes(Number(x.weight)) ? 'blin' : 'quyma'
+  return 'standard'
+}
 const keyOf = (type, weight) => `${type}:${weight}`
 
 
@@ -55,9 +62,11 @@ const filteredSpecs = computed(() =>
   specs.filter(s => String(s.weight).includes(specSearch.value.trim()))
 )
 
-const fullSpecs = computed(() =>
-  specs.filter(s => String(s.weight).includes(search.value.trim()))
-)
+const shtangaOptions = computed(() => [
+  ...specs.map(s => ({ type: 'standard', weight: Number(s.weight), spec: s })),
+  ...QUYMA_WEIGHTS.map(weight => ({ type: 'quyma', weight, spec: null }))
+].filter(item => String(item.weight).includes(search.value.trim()))
+ .sort((a, b) => b.weight - a.weight))
 
 function normalizeItems(items = []) {
   return items
@@ -70,12 +79,18 @@ function normalizeItems(items = []) {
         : null
       return { type, weight, qty, spec }
     })
-    .filter(x => x.qty > 0 && (x.type === 'quyma'
-      ? QUYMA_WEIGHTS.includes(x.weight) : Boolean(x.spec)))
+    .filter(x => x.qty > 0 && (
+      x.type === 'quyma' ? QUYMA_WEIGHTS.includes(x.weight)
+      : x.type === 'blin' ? BLIN_WEIGHTS.includes(x.weight)
+      : Boolean(x.spec)
+    ))
 }
 const lineItems = computed(() => normalizeItems(lines.value))
 const usedQuymaWeights = computed(() =>
   QUYMA_WEIGHTS.filter(w => lineItems.value.some(x => x.type === 'quyma' && x.weight === w))
+)
+const usedBlinWeights = computed(() =>
+  BLIN_WEIGHTS.filter(w => lineItems.value.some(x => x.type === 'blin' && x.weight === w))
 )
 
 const barCount = computed(() =>
@@ -94,10 +109,12 @@ function weightFor(items, type) {
 }
 const standardWeight = computed(() => weightFor(lineItems.value, 'standard'))
 const quymaWeight = computed(() => weightFor(lineItems.value, 'quyma'))
-const totalWeight = computed(() => standardWeight.value + quymaWeight.value)
-const standardAmount = computed(() => standardWeight.value * Number(standardPrice.value || 0))
-const quymaAmount = computed(() => quymaWeight.value * Number(quymaPrice.value || 0))
-const totalAmount = computed(() => standardAmount.value + quymaAmount.value)
+const shtangaWeight = computed(() => standardWeight.value + quymaWeight.value)
+const blinWeight = computed(() => weightFor(lineItems.value, 'blin'))
+const totalWeight = computed(() => shtangaWeight.value + blinWeight.value)
+const standardAmount = computed(() => shtangaWeight.value * Number(standardPrice.value || 0))
+const blinAmount = computed(() => blinWeight.value * Number(quymaPrice.value || 0))
+const totalAmount = computed(() => standardAmount.value + blinAmount.value)
 
 function calculate(items) {
   const totals = Object.fromEntries(
@@ -110,7 +127,7 @@ function calculate(items) {
   const rods = {}
 
   for (const item of items) {
-    if (kindOf(item) === 'quyma') continue
+    if (kindOf(item) !== 'standard') continue
     const spec = specs.find(
       s => Number(s.weight) === Number(item.weight)
     )
@@ -178,12 +195,13 @@ function removeLine(type, weight) {
 function orderPrices(order) {
   return {
     standard: Number(order?.prices?.standard ?? DEFAULT_STANDARD_PRICE),
-    quyma: Number(order?.prices?.quyma ?? DEFAULT_QUYMA_PRICE)
+    blin: Number(order?.prices?.blin ?? order?.prices?.quyma ?? DEFAULT_QUYMA_PRICE)
   }
 }
 function orderAmount(order) {
   const prices = orderPrices(order)
-  return weightFor(order.lines, 'standard') * prices.standard + weightFor(order.lines, 'quyma') * prices.quyma
+  return (weightFor(order.lines, 'standard') + weightFor(order.lines, 'quyma')) * prices.standard
+    + weightFor(order.lines, 'blin') * prices.blin
 }
 
 function clearOrder() {
@@ -217,7 +235,7 @@ function saveOrder() {
       name.value.trim() ||
       `Buyurtma ${new Date().toLocaleDateString('uz-UZ')}`,
     date: new Date().toISOString(),
-    prices: { standard: Number(standardPrice.value), quyma: Number(quymaPrice.value) },
+    prices: { standard: Number(standardPrice.value), blin: Number(quymaPrice.value) },
     lines: lineItems.value.map(({ type, weight, qty }) => ({
       type, weight, qty
     }))
@@ -230,7 +248,7 @@ function loadOrder(order) {
   lines.value = normalizeItems(order.lines).map(({ type, weight, qty }) => ({ type, weight, qty }))
   const prices = orderPrices(order)
   standardPrice.value = prices.standard
-  quymaPrice.value = prices.quyma
+  quymaPrice.value = prices.blin
   mode.value = 'standard'
   name.value = order.name
   view.value = 'calculator'
@@ -253,10 +271,11 @@ function deleteOrder(id) {
 async function downloadPDF(
   items = lineItems.value,
   title = name.value,
-  prices = { standard: Number(standardPrice.value), quyma: Number(quymaPrice.value) }
+  prices = { standard: Number(standardPrice.value), blin: Number(quymaPrice.value) },
+  reportType = 'manufacturer'
 ) {
   if (!items.length) {
-    notice.value = 'PDF uchun avval shtangalarni kiriting.'
+    notice.value = 'PDF uchun avval mahsulotlarni kiriting.'
     return
   }
 
@@ -265,8 +284,11 @@ async function downloadPDF(
     const { totals, rods } = calculate(items)
     const stdWeight = weightFor(items, 'standard')
     const castWeight = weightFor(items, 'quyma')
-    const weight = stdWeight + castWeight
-    const amount = stdWeight * prices.standard + castWeight * prices.quyma
+    const shtangaKg = stdWeight + castWeight
+    const blinKg = weightFor(items, 'blin')
+    const weight = shtangaKg + blinKg
+    const blinPrice = Number(prices.blin ?? prices.quyma ?? DEFAULT_QUYMA_PRICE)
+    const amount = shtangaKg * prices.standard + blinKg * blinPrice
 
     const pdf = await PDFDocument.create()
     pdf.registerFontkit(fontkit)
@@ -311,7 +333,7 @@ async function downloadPDF(
     }
     function footer() {
       lineAt(37)
-      text('Alyans sport  •  Ishlab chiqarish hisoboti', margin, 23, 8, muted)
+      text(`Alyans sport  •  ${reportType === 'client' ? 'Mijoz uchun buyurtma' : 'Ishlab chiqarish hisoboti'}`, margin, 23, 8, muted)
       right(`Sahifa ${pageNumber}`, W - margin, 23, 8, muted)
     }
     function newPage() {
@@ -319,7 +341,7 @@ async function downloadPDF(
       page = pdf.addPage(pageSize)
       pageNumber++
       y = 785
-      text('Alyans sport  /  HISOBOT DAVOMI', margin, 804, 9, accent)
+      text('Alyans sport  /  DAVOMI', margin, 804, 9, accent)
       lineAt(794)
     }
     function ensure(height) {
@@ -377,7 +399,7 @@ async function downloadPDF(
       height: logoSize
     })
     text('Alyans sport', margin + 70, 801, 22, white)
-    text('ISHLAB CHIQARISH HISOBOTI', margin + 70, 778, 10, rgb(0.75, 0.85, 0.96))
+    text(reportType === 'client' ? 'BUYURTMA MA’LUMOTLARI' : 'ISHLAB CHIQARISH HISOBOTI', margin + 70, 778, 10, rgb(0.75, 0.85, 0.96))
     right(new Date().toLocaleDateString('uz-UZ'), W - margin, 802, 9, white)
     y = 725
     text('BUYURTMA', margin, y, 8, accent)
@@ -389,47 +411,56 @@ async function downloadPDF(
     lineAt(y)
     y -= 26
 
-    // Weight and cost summaries in two tidy tables.
-    const stdQty = items.filter(x => x.type === 'standard').reduce((n, x) => n + x.qty, 0)
-    const castQty = items.filter(x => x.type === 'quyma').reduce((n, x) => n + x.qty, 0)
+    // Client report: order, quantities, weights, prices.
+    // Manufacturer report: all of the above plus parts and rods.
+    const assembledItems = items.filter(x => x.type === 'standard').sort((a, b) => b.weight - a.weight)
+    const castItems = items.filter(x => x.type === 'quyma').sort((a, b) => b.weight - a.weight)
+    const blinItems = items.filter(x => x.type === 'blin').sort((a, b) => b.weight - a.weight)
+    const shtangaItems = [...assembledItems, ...castItems].sort((a, b) => b.weight - a.weight)
+    const shtangaQty = shtangaItems.reduce((n, x) => n + x.qty, 0)
+    const blinQty = blinItems.reduce((n, x) => n + x.qty, 0)
     table('OG‘IRLIK VA NARXLAR', ['Turi', 'Soni', 'Og‘irlik', 'Narx / kg', 'Summa'],
       [145, 67, 90, 100, contentW - 402], [
-        ['Standard', fmt(stdQty), `${fmt(stdWeight)} kg`, money(prices.standard), money(stdWeight * prices.standard)],
-        ['Quyma', fmt(castQty), `${fmt(castWeight)} kg`, money(prices.quyma), money(castWeight * prices.quyma)]
-      ], ['JAMI', fmt(stdQty + castQty), `${fmt(weight)} kg`, '—', money(amount)])
+        ['Shtanga', fmt(shtangaQty), `${fmt(shtangaKg)} kg`, money(prices.standard), money(shtangaKg * prices.standard)],
+        ['Blin', fmt(blinQty), `${fmt(blinKg)} kg`, money(blinPrice), money(blinKg * blinPrice)]
+      ], ['JAMI', fmt(shtangaQty + blinQty), `${fmt(weight)} kg`, '—', money(amount)])
 
-    const standardItems = items.filter(x => x.type === 'standard').sort((a,b) => b.weight-a.weight)
-    const castItems = items.filter(x => x.type === 'quyma').sort((a,b) => b.weight-a.weight)
-    table('STANDARD SHTANGALAR', ['Og‘irligi', 'Soni', 'Dasta uzunligi', 'Jami kg'],
+    table('SHTANGALAR', ['Og‘irligi', 'Soni', 'Turi', 'Jami kg'],
       [145, 100, 135, contentW - 380],
-      standardItems.map(x => {
-        const spec = specs.find(s => Number(s.weight) === Number(x.weight))
-        return [`${fmt(x.weight)} kg`, `${fmt(x.qty)} ta`, `${spec?.length ?? '—'} sm`, `${fmt(x.weight * x.qty)} kg`]
-      }), standardItems.length ? ['JAMI', `${fmt(stdQty)} ta`, '', `${fmt(stdWeight)} kg`] : null)
+      shtangaItems.map(x => [
+        `${fmt(x.weight)} kg`, `${fmt(x.qty)} ta`,
+        x.type === 'quyma' ? 'Quyma' : 'Yig‘ma', `${fmt(x.weight * x.qty)} kg`
+      ]), shtangaItems.length ? ['JAMI', `${fmt(shtangaQty)} ta`, '', `${fmt(shtangaKg)} kg`] : null)
 
-    table('QUYMA TOSHLAR (BIR BUTUN)', ['Og‘irligi', 'Soni', 'Jami og‘irlik'],
+    table('BLINLAR', ['Og‘irligi', 'Soni', 'Jami og‘irlik'],
       [190, 145, contentW - 335],
-      castItems.map(x => [`${fmt(x.weight)} kg`, `${fmt(x.qty)} ta`, `${fmt(x.weight*x.qty)} kg`]),
-      castItems.length ? ['JAMI', `${fmt(castQty)} ta`, `${fmt(castWeight)} kg`] : null)
+      blinItems.map(x => [`${fmt(x.weight)} kg`, `${fmt(x.qty)} ta`, `${fmt(x.weight * x.qty)} kg`]),
+      blinItems.length ? ['JAMI', `${fmt(blinQty)} ta`, `${fmt(blinKg)} kg`] : null)
 
-    if (standardItems.length) {
+    if (reportType === 'manufacturer' && assembledItems.length) {
       const partRows = WEIGHTS.map(w => {
         const t = totals[String(w)]
-        return [`${w} kg`, fmt(t.regular), fmt(t.threaded), fmt(t.regular+t.threaded)]
-      }).filter(r => Number(r[1].replace(/\D/g,'')) + Number(r[2].replace(/\D/g,'')) > 0)
-      const regular = Object.values(totals).reduce((n,t) => n+t.regular,0)
-      const threaded = Object.values(totals).reduce((n,t) => n+t.threaded,0)
-      table('STANDARD UCHUN TOSH QISMLAR', ['Og‘irligi', 'Oddiy', 'Rezbali', 'Jami'],
+        return [`${w} kg`, fmt(t.regular), fmt(t.threaded), fmt(t.regular + t.threaded)]
+      }).filter((_, i) => {
+        const t = totals[String(WEIGHTS[i])]
+        return t.regular + t.threaded > 0
+      })
+      const regular = Object.values(totals).reduce((n, t) => n + t.regular, 0)
+      const threaded = Object.values(totals).reduce((n, t) => n + t.threaded, 0)
+      table('SHTANGA UCHUN TOSH QISMLAR', ['Og‘irligi', 'Oddiy', 'Rezbali', 'Jami'],
         [145, 115, 115, contentW - 375], partRows,
-        ['JAMI', fmt(regular), fmt(threaded), fmt(regular+threaded)])
+        ['JAMI', fmt(regular), fmt(threaded), fmt(regular + threaded)])
       table('KERAKLI DASTALAR', ['Dasta uzunligi', 'Soni'],
-        [contentW/2, contentW/2],
-        Object.entries(rods).filter(([,q]) => q > 0).sort((a,b)=>Number(b[0])-Number(a[0]))
-          .map(([len,qty]) => [`${len} sm`, `${fmt(qty)} ta`]))
+        [contentW / 2, contentW / 2],
+        Object.entries(rods).filter(([, q]) => q > 0).sort((a, b) => Number(b[0]) - Number(a[0]))
+          .map(([len, qty]) => [`${len} sm`, `${fmt(qty)} ta`]))
     }
     ensure(42)
     y -= 22
-    text('Izoh: Quyma toshlar yig‘ilmaydi. Dasta va rezbali qismlar faqat standard uchun.', margin, y, 8, muted)
+    text(reportType === 'client'
+      ? 'Quyma shtangalar: 0.5 kg, 1 kg va 2 kg.'
+      : 'Quyma shtangalar bir butun. Qismlar va dastalar faqat yig‘ma shtangalar uchun.',
+      margin, y, 8, muted)
     footer()
 
     const bytes = await pdf.save()
@@ -443,7 +474,7 @@ async function downloadPDF(
 
     link.href = url
     link.download =
-      `Alyans sport-hisobot-${new Date().toISOString().slice(0, 10)}.pdf`
+      `Alyans-sport-${reportType === 'client' ? 'mijoz' : 'ishlab-chiqarish'}-${new Date().toISOString().slice(0, 10)}.pdf`
 
     document.body.appendChild(link)
     link.click()
@@ -499,7 +530,7 @@ const totalSaved = computed(() => saved.value.length)
       </nav>
 
       <div class="side-note">
-        39 xil standard shtanga · 9 xil quyma tosh
+        39 xil yig‘ma shtanga · 3 xil quyma · 6 xil blin
         <br />
         O‘rnatilgach internetsiz ishlaydi
       </div>
@@ -552,7 +583,7 @@ const totalSaved = computed(() => saved.value.length)
           <!-- STATISTIKA -->
           <div class="stats">
             <div class="stat">
-              <span>Yig‘iladigan shtangalar</span>
+              <span>Buyurtmadagi mahsulotlar</span>
               <strong>
                 {{ barCount.toLocaleString('uz-UZ') }}
               </strong>
@@ -560,12 +591,12 @@ const totalSaved = computed(() => saved.value.length)
 
             <!-- YANGI JAMI OG‘IRLIK -->
             <div class="stat">
-              <span>Standard og‘irligi</span>
-              <strong>{{ fmt(standardWeight) }} kg</strong>
+              <span>Shtanga og‘irligi</span>
+              <strong>{{ fmt(shtangaWeight) }} kg</strong>
             </div>
             <div class="stat">
-              <span>Quyma og‘irligi</span>
-              <strong>{{ fmt(quymaWeight) }} kg</strong>
+              <span>Blin og‘irligi</span>
+              <strong>{{ fmt(blinWeight) }} kg</strong>
             </div>
             <div class="stat">
               <span>Jami og‘irlik</span>
@@ -597,7 +628,7 @@ const totalSaved = computed(() => saved.value.length)
                 <div>
                   <h2>Buyurtma ma’lumotlari</h2>
                   <p>
-                    Standard shtangalar yoki quyma toshlarni kiriting.
+                    Shtangalar (yig‘ma va quyma) yoki blinlarni kiriting.
                   </p>
                 </div>
               </div>
@@ -616,33 +647,45 @@ const totalSaved = computed(() => saved.value.length)
 
               <div class="tabs">
                 <button :class="{ selected: mode === 'standard' }" @click="mode = 'standard'">
-                  Standard toshlar
+                  Shtanga
                 </button>
-                <button :class="{ selected: mode === 'quyma' }" @click="mode = 'quyma'">
-                  Quyma toshlar
+                <button :class="{ selected: mode === 'blin' }" @click="mode = 'blin'">
+                  Blin
                 </button>
               </div>
 
               <template v-if="mode === 'standard'">
+                <p class="muted">Yashil rang: 0.5 kg, 1 kg va 2 kg quyma shtangalar.</p>
                 <input v-model="search" class="text-input" type="search"
-                  placeholder="Og‘irlikni qidiring, masalan 17" aria-label="Standard og‘irliklarni qidirish" />
+                  placeholder="Og‘irlikni qidiring, masalan 17" aria-label="Shtanga og‘irliklarini qidirish" />
                 <div class="full-list">
-                  <div v-for="s in fullSpecs" :key="s.weight" class="full-row">
-                    <div><strong>{{ s.weight }} kg</strong><small>{{ s.length }} sm dasta</small></div>
-                    <input :aria-label="`Soni: ${s.weight} kg standard`" type="number" min="0"
-                      max="1000000" step="1" :value="getQty('standard', s.weight)"
-                      @input="setQty('standard', s.weight, $event.target.value)" />
+                  <div v-for="item in shtangaOptions" :key="keyOf(item.type, item.weight)"
+                    class="full-row"
+                    :style="item.type === 'quyma'
+                      ? { backgroundColor: '#e5f7eb', borderLeft: '4px solid #159447', paddingLeft: '10px' }
+                      : {}">
+                    <div>
+                      <strong :style="item.type === 'quyma' ? { color: '#126c37' } : {}">
+                        {{ item.weight }} kg
+                        <span v-if="item.type === 'quyma'"> — QUYMA</span>
+                      </strong>
+                      <small>{{ item.type === 'quyma' ? 'Bir butun quyma shtanga' : `${item.spec.length} sm dasta · yig‘ma` }}</small>
+                    </div>
+                    <input :aria-label="`Soni: ${item.weight} kg ${item.type === 'quyma' ? 'quyma' : 'yig‘ma'} shtanga`"
+                      type="number" min="0" max="1000000" step="1"
+                      :value="getQty(item.type, item.weight)"
+                      @input="setQty(item.type, item.weight, $event.target.value)" />
                   </div>
                 </div>
               </template>
               <template v-else>
-                <p class="muted">Quyma toshlar bir butun bo‘lib tayyorlanadi, yig‘ish qismlari kerak emas.</p>
+                <p class="muted">Blinlar — katta shtangalarga qo‘shiladigan alohida disklar.</p>
                 <div class="full-list">
-                  <div v-for="w in QUYMA_WEIGHTS" :key="w" class="full-row">
-                    <div><strong>{{ w }} kg</strong><small>Bir butun quyma tosh</small></div>
-                    <input :aria-label="`Soni: ${w} kg quyma`" type="number" min="0"
-                      max="1000000" step="1" :value="getQty('quyma', w)"
-                      @input="setQty('quyma', w, $event.target.value)" />
+                  <div v-for="w in BLIN_WEIGHTS" :key="w" class="full-row">
+                    <div><strong>{{ w }} kg</strong><small>Blin · disk</small></div>
+                    <input :aria-label="`Soni: ${w} kg blin`" type="number" min="0"
+                      max="1000000" step="1" :value="getQty('blin', w)"
+                      @input="setQty('blin', w, $event.target.value)" />
                   </div>
                 </div>
               </template>
@@ -652,33 +695,33 @@ const totalSaved = computed(() => saved.value.length)
               <p class="muted">Har bir buyurtma uchun alohida o‘zgartirish mumkin.</p>
               <div class="entry-grid">
                 <div>
-                  <label class="field-label" for="standard-price">Standard toshlar</label>
+                  <label class="field-label" for="standard-price">Shtanga (yig‘ma + quyma)</label>
                   <input id="standard-price" v-model.number="standardPrice" type="number"
                     min="0" step="100" class="text-input" />
                 </div>
                 <div>
-                  <label class="field-label" for="quyma-price">Quyma toshlar</label>
+                  <label class="field-label" for="quyma-price">Blin</label>
                   <input id="quyma-price" v-model.number="quymaPrice" type="number"
                     min="0" step="100" class="text-input" />
                 </div>
               </div>
               <div class="info">
-                Standard: {{ fmt(standardWeight) }} kg × {{ fmt(standardPrice) }} = {{ fmt(standardAmount) }} so‘m<br />
-                Quyma: {{ fmt(quymaWeight) }} kg × {{ fmt(quymaPrice) }} = {{ fmt(quymaAmount) }} so‘m<br />
+                Shtanga: {{ fmt(shtangaWeight) }} kg × {{ fmt(standardPrice) }} = {{ fmt(standardAmount) }} so‘m<br />
+                Blin: {{ fmt(blinWeight) }} kg × {{ fmt(quymaPrice) }} = {{ fmt(blinAmount) }} so‘m<br />
                 <strong>Jami narx: {{ fmt(totalAmount) }} so‘m</strong>
               </div>
 
               <div class="section-divider"></div>
 
               <h3>
-                Buyurtmadagi shtangalar
+                Buyurtmadagi mahsulotlar
                 <span class="muted">
                   ({{ lineItems.length }} tur)
                 </span>
               </h3>
 
               <div v-if="!lineItems.length" class="empty">
-                Hali shtanga qo‘shilmadi.
+                Hali mahsulot qo‘shilmadi.
                 Og‘irlik va sonini kiriting.
               </div>
 
@@ -690,13 +733,13 @@ const totalSaved = computed(() => saved.value.length)
                   :key="keyOf(item.type, item.weight)"
                   class="order-row"
                 >
-                  <div class="weight-bubble">
+                  <div class="weight-bubble" :style="item.type === 'quyma' ? { backgroundColor: '#dcfce7', color: '#166534' } : {}">
                     {{ item.weight }}
                   </div>
 
                   <div class="order-description">
                     <strong>
-                      {{ item.weight }} kg {{ item.type === 'quyma' ? 'quyma tosh' : 'standard shtanga' }}
+                      {{ item.weight }} kg {{ item.type === 'quyma' ? 'quyma shtanga' : item.type === 'blin' ? 'blin' : 'yig‘ma shtanga' }}
                     </strong>
 
                     <small>
@@ -704,7 +747,7 @@ const totalSaved = computed(() => saved.value.length)
                         {{ item.spec.length }} sm ·
                         {{ Object.entries(item.spec.parts).map(([w, n]) => `${n}×${w}`).join(' + ') }} / tomon
                       </template>
-                      <template v-else>Bir butun · yig‘ish talab qilinmaydi</template>
+                      <template v-else>{{ item.type === 'quyma' ? 'Quyma · bir butun shtanga' : 'Blin · alohida disk' }}</template>
                     </small>
                   </div>
 
@@ -733,7 +776,7 @@ const totalSaved = computed(() => saved.value.length)
               <div class="panel-header">
                 <div>
                   <h2>Kerakli qismlar</h2>
-                  <p>Standard uchun yig‘ish qismlari, quyma uchun tayyor toshlar.</p>
+                  <p>Yig‘ma shtangalar uchun qismlar; quyma shtangalar va blinlar alohida.</p>
                 </div>
 
                 <span class="tag">JONLI</span>
@@ -743,7 +786,7 @@ const totalSaved = computed(() => saved.value.length)
                 v-if="!barCount"
                 class="empty results-empty"
               >
-                Hisoblash uchun shtangalarni qo‘shing.
+                Hisoblash uchun mahsulotlarni qo‘shing.
               </div>
 
               <template v-else>
@@ -819,8 +862,8 @@ const totalSaved = computed(() => saved.value.length)
                   </table>
                 </div>
 
-                <h3 class="subheading">Quyma toshlar</h3>
-                <div class="table-scroll">
+                <h3 class="subheading">Quyma shtangalar (0.5 / 1 / 2 kg)</h3>
+                <div v-if="usedQuymaWeights.length" class="table-scroll">
                   <table>
                     <thead><tr><th>Og‘irligi</th><th>Soni</th><th>Jami kg</th></tr></thead>
                     <tbody>
@@ -830,12 +873,25 @@ const totalSaved = computed(() => saved.value.length)
                         <td>{{ fmt(w * getQty('quyma', w)) }}</td>
                       </tr>
                     </tbody>
-                    <tfoot><tr><td>Jami</td><td>{{ fmt(lineItems.filter(x => x.type === 'quyma').reduce((n,x) => n+x.qty, 0)) }}</td><td>{{ fmt(quymaWeight) }} kg</td></tr></tfoot>
+                  </table>
+                </div>
+                <h3 class="subheading">Blinlar</h3>
+                <div v-if="usedBlinWeights.length" class="table-scroll">
+                  <table>
+                    <thead><tr><th>Og‘irligi</th><th>Soni</th><th>Jami kg</th></tr></thead>
+                    <tbody>
+                      <tr v-for="w in usedBlinWeights" :key="w">
+                        <td><strong>{{ w }} kg</strong></td>
+                        <td>{{ fmt(getQty('blin', w)) }}</td>
+                        <td>{{ fmt(w * getQty('blin', w)) }}</td>
+                      </tr>
+                    </tbody>
+                    <tfoot><tr><td>Jami</td><td>{{ fmt(lineItems.filter(x => x.type === 'blin').reduce((n,x) => n+x.qty, 0)) }}</td><td>{{ fmt(blinWeight) }} kg</td></tr></tfoot>
                   </table>
                 </div>
                 <div class="info">
-                  <strong>Standard: {{ fmt(standardWeight) }} kg</strong> ·
-                  <strong>Quyma: {{ fmt(quymaWeight) }} kg</strong> ·
+                  <strong>Shtanga: {{ fmt(shtangaWeight) }} kg</strong> ·
+                  <strong>Blin: {{ fmt(blinWeight) }} kg</strong> ·
                   <strong>Umumiy: {{ fmt(totalWeight) }} kg</strong><br />
                   <strong>Jami narx: {{ fmt(totalAmount) }} so‘m</strong>
                 </div>
@@ -863,7 +919,7 @@ const totalSaved = computed(() => saved.value.length)
                 </div>
 
                 <div class="info">
-                  Har bir standard shtanga uchun 1 ta dasta va
+                  Har bir yig‘ma shtanga uchun 1 ta dasta va
                   2 ta rezbali tosh kerak — har tomondagi
                   eng kichik tosh rezbali, qolganlari oddiy.
                 </div>
@@ -876,11 +932,11 @@ const totalSaved = computed(() => saved.value.length)
                     Buyurtmani saqlash
                   </button>
 
-                  <button
-                    class="btn secondary"
-                    @click="downloadPDF()"
-                  >
-                    PDF yuklab olish
+                  <button class="btn secondary" @click="downloadPDF(lineItems, name, undefined, 'client')">
+                    Mijoz uchun PDF
+                  </button>
+                  <button class="btn secondary" @click="downloadPDF()">
+                    Ishlab chiqarish PDF
                   </button>
                 </div>
               </template>
@@ -940,7 +996,7 @@ const totalSaved = computed(() => saved.value.length)
                       0
                     )
                   }}
-                  ta shtanga
+                  ta mahsulot
                 </small>
 
                 <!-- SAQLANGAN BUYURTMA OG‘IRLIGI -->
@@ -955,7 +1011,7 @@ const totalSaved = computed(() => saved.value.length)
                     kg
                   </strong>
                 </small>
-                <small>Standard: {{ fmt(weightFor(o.lines, 'standard')) }} kg · Quyma: {{ fmt(weightFor(o.lines, 'quyma')) }} kg</small>
+                <small>Shtanga: {{ fmt(weightFor(o.lines, 'standard') + weightFor(o.lines, 'quyma')) }} kg · Blin: {{ fmt(weightFor(o.lines, 'blin')) }} kg</small>
                 <small>Jami narx: <strong>{{ fmt(orderAmount(o)) }} so‘m</strong></small>
               </div>
 
@@ -967,12 +1023,14 @@ const totalSaved = computed(() => saved.value.length)
                   Ochish
                 </button>
 
-                <button
-                  class="btn secondary small"
-                  @click="downloadPDF(o.lines, o.name, orderPrices(o))"
-                >
-                  PDF yuklab olish
-                </button>
+                  <button class="btn secondary small"
+                    @click="downloadPDF(o.lines, o.name, orderPrices(o), 'client')">
+                    Mijoz PDF
+                  </button>
+                  <button class="btn secondary small"
+                    @click="downloadPDF(o.lines, o.name, orderPrices(o), 'manufacturer')">
+                    Ishlab chiqarish PDF
+                  </button>
 
                 <button
                   class="btn danger small"

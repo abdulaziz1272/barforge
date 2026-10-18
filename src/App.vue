@@ -606,7 +606,7 @@ const totalSaved = computed(() => saved.value.length)
               </strong>
             </div>
 
-            <div class="stat">
+            <!-- <div class="stat">
               <span>Oddiy toshlar</span>
               <strong>
                 {{ totalRegular.toLocaleString('uz-UZ') }}
@@ -618,7 +618,7 @@ const totalSaved = computed(() => saved.value.length)
               <strong>
                 {{ totalThreaded.toLocaleString('uz-UZ') }}
               </strong>
-            </div>
+            </div> -->
           </div>
 
           <div class="columns">

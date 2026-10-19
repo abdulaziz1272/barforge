@@ -1,6 +1,6 @@
 
 <script setup>
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import specs from './specs.json'
 import { PDFDocument, rgb } from 'pdf-lib'
 import fontkit from '@pdf-lib/fontkit'
@@ -36,6 +36,156 @@ const name = ref('')
 const lines = ref([])
 const saved = ref(loadSaved())
 const notice = ref(null)
+const archiveEntries = ref([])
+const archiveSearch = ref('')
+const archiveBusy = ref(false)
+const archiveDBName = 'alyans-sport-pdf-archive-v1'
+const archiveStore = 'reports'
+const filteredArchive = computed(() => archiveEntries.value.filter(item =>
+  `${item.orderName} ${item.filename} ${item.reportType}`.toLowerCase()
+    .includes(archiveSearch.value.trim().toLowerCase())
+))
+
+function openArchiveDB() {
+  return new Promise((resolve, reject) => {
+    if (!('indexedDB' in window)) return reject(new Error('IndexedDB unavailable'))
+    const request = indexedDB.open(archiveDBName, 1)
+    request.onupgradeneeded = () => {
+      const db = request.result
+      if (!db.objectStoreNames.contains(archiveStore)) {
+        db.createObjectStore(archiveStore, { keyPath: 'id' })
+      }
+    }
+    request.onsuccess = () => resolve(request.result)
+    request.onerror = () => reject(request.error)
+  })
+}
+
+async function archiveTransaction(mode, operation) {
+  const db = await openArchiveDB()
+  try {
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(archiveStore, mode)
+      const request = operation(tx.objectStore(archiveStore))
+      let result
+      request.onsuccess = () => { result = request.result }
+      request.onerror = () => reject(request.error)
+      tx.oncomplete = () => resolve(result)
+      tx.onerror = () => reject(tx.error)
+      tx.onabort = () => reject(tx.error)
+    })
+  } finally {
+    db.close()
+  }
+}
+
+async function refreshArchive() {
+  try {
+    const records = await archiveTransaction('readonly', store => store.getAll())
+    archiveEntries.value = records.map(({ id, filename, orderName, reportType, createdAt, size }) =>
+      ({ id, filename, orderName, reportType, createdAt, size })
+    ).sort((a, b) => b.createdAt - a.createdAt)
+  } catch (error) {
+    console.error('PDF archive read failed:', error)
+    notice.value = 'PDF arxivini o‘qib bo‘lmadi. Brauzer xotirasini tekshiring.'
+  }
+}
+
+async function savePDFToArchive(blob, filename, orderName, reportType, createdAt) {
+  const record = {
+    id: (typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID() : `${createdAt}-${Math.random().toString(36).slice(2)}`,
+    filename, orderName, reportType, createdAt, size: blob.size, blob
+  }
+  await archiveTransaction('readwrite', store => store.put(record))
+  await refreshArchive()
+}
+
+async function getArchivedPDF(id) {
+  return archiveTransaction('readonly', store => store.get(id))
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 60000)
+}
+
+async function downloadArchivedPDF(entry) {
+  try {
+    const record = await getArchivedPDF(entry.id)
+    if (!record) throw new Error('Missing report')
+    downloadBlob(record.blob, record.filename)
+  } catch (error) {
+    console.error(error)
+    notice.value = 'PDF faylini ochib bo‘lmadi.'
+  }
+}
+
+async function openArchivedPDF(entry) {
+  // Open the tab on the click itself to avoid popup blockers after IndexedDB reads.
+  const tab = window.open('', '_blank')
+  try {
+    const record = await getArchivedPDF(entry.id)
+    if (!record) throw new Error('Missing report')
+    const url = URL.createObjectURL(record.blob)
+    if (tab) {
+      tab.location.href = url
+      setTimeout(() => URL.revokeObjectURL(url), 120000)
+    } else {
+      URL.revokeObjectURL(url)
+      downloadBlob(record.blob, record.filename)
+      notice.value = 'Brauzer yangi oynani blokladi. PDF yuklab olindi.'
+    }
+  } catch (error) {
+    if (tab) tab.close()
+    console.error(error)
+    notice.value = 'PDF faylini ochib bo‘lmadi.'
+  }
+}
+
+async function shareArchivedPDF(entry) {
+  try {
+    const record = await getArchivedPDF(entry.id)
+    if (!record) throw new Error('Missing report')
+    const file = new File([record.blob], record.filename, { type: 'application/pdf' })
+    if (navigator.share && navigator.canShare?.({ files: [file] })) {
+      await navigator.share({ files: [file], title: record.orderName })
+    } else {
+      downloadBlob(record.blob, record.filename)
+      notice.value = 'Ushbu brauzer PDF ulashishni qo‘llamaydi. Fayl yuklab olindi.'
+    }
+  } catch (error) {
+    if (error?.name === 'AbortError') return
+    console.error(error)
+    notice.value = 'PDFni ulashishda xatolik yuz berdi.'
+  }
+}
+
+async function deleteArchivedPDF(entry) {
+  if (!confirm(`“${entry.filename}” arxivdan o‘chirilsinmi?`)) return
+  try {
+    await archiveTransaction('readwrite', store => store.delete(entry.id))
+    await refreshArchive()
+    notice.value = 'PDF arxivdan o‘chirildi.'
+  } catch (error) {
+    console.error(error)
+    notice.value = 'PDFni o‘chirib bo‘lmadi.'
+  }
+}
+
+function showArchive() {
+  view.value = 'archive'
+  refreshArchive()
+}
+
+onMounted(refreshArchive)
+
 
 function loadSaved() {
   try {
@@ -469,20 +619,40 @@ async function downloadPDF(
       type: 'application/pdf'
     })
 
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
+    // Identify reports by order name, local download date/time, and report type.
+    const downloadedAt = new Date()
+    const pad2 = value => String(value).padStart(2, '0')
+    const downloadDate = [
+      downloadedAt.getFullYear(),
+      pad2(downloadedAt.getMonth() + 1),
+      pad2(downloadedAt.getDate())
+    ].join('-')
+    const downloadTime = [
+      pad2(downloadedAt.getHours()),
+      pad2(downloadedAt.getMinutes()),
+      pad2(downloadedAt.getSeconds())
+    ].join('-')
+    const safeOrderName = String(title || 'Nomsiz buyurtma')
+      .trim()
+      .replace(/[<>:"/\\|?*\x00-\x1F]/g, '')
+      .replace(/\s+/g, ' ')
+      .slice(0, 70) || 'Nomsiz buyurtma'
+    const reportLabel = reportType === 'client' ? 'mijoz' : 'ishlab-chiqarish'
+    const filename = `${safeOrderName}_${downloadDate}_${downloadTime}_${reportLabel}.pdf`
 
-    link.href = url
-    link.download =
-      `Alyans-sport-${reportType === 'client' ? 'mijoz' : 'ishlab-chiqarish'}-${new Date().toISOString().slice(0, 10)}.pdf`
-
-    document.body.appendChild(link)
-    link.click()
-    link.remove()
-
-    setTimeout(() => URL.revokeObjectURL(url), 3000)
-
-    notice.value = 'PDF hisobot yuklab olindi.'
+    // Preserve the existing PDF download workflow even if archive storage fails.
+    let archived = false
+    try {
+      await savePDFToArchive(blob, filename, String(title || 'Nomsiz buyurtma'),
+        reportType, downloadedAt.getTime())
+      archived = true
+    } catch (archiveError) {
+      console.error('PDF archive save failed:', archiveError)
+    }
+    downloadBlob(blob, filename)
+    notice.value = archived
+      ? 'PDF yuklab olindi va PDF arxiviga saqlandi.'
+      : 'PDF yuklab olindi, ammo arxivga saqlanmadi. Qurilma xotirasini tekshiring.'
   } catch (e) {
     console.error(e)
 
@@ -519,6 +689,11 @@ const totalSaved = computed(() => saved.value.length)
         >
           ◷ <span>Saqlangan buyurtmalar</span>
           <em>{{ totalSaved }}</em>
+        </button>
+
+        <button :class="{ active: view === 'archive' }" @click="showArchive">
+          ▣ <span>PDF arxivi</span>
+          <em>{{ archiveEntries.length }}</em>
         </button>
 
         <button
@@ -1043,6 +1218,50 @@ const totalSaved = computed(() => saved.value.length)
           </section>
         </template>
 
+        <!-- PDF ARXIVI -->
+        <template v-else-if="view === 'archive'">
+          <div class="page-heading">
+            <div>
+              <div class="eyebrow">SAQLANGAN PDF HISOBOTLAR</div>
+              <h1>PDF arxivi</h1>
+              <p>PDFlar shu qurilmada saqlanadi. Mijoz va ishlab chiqarish hisobotlarini ochish, ulashish yoki qayta yuklab olish mumkin.</p>
+            </div>
+          </div>
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>PDF hisobotlar</h2>
+                <p>{{ archiveEntries.length }} ta PDF · Faqat ushbu qurilmada</p>
+              </div>
+            </div>
+            <input v-model="archiveSearch" class="text-input" type="search"
+              placeholder="Buyurtma nomi yoki PDF turini qidiring..."
+              aria-label="PDF arxivini qidirish" />
+            <p class="muted" style="margin-top: 12px;">
+              Yangi PDF yaratilganda avtomatik arxivga saqlanadi. Brauzer ma’lumotlarini tozalash arxivni ham o‘chirishi mumkin.
+            </p>
+            <div v-if="!archiveEntries.length" class="empty">
+              Hozircha PDF yo‘q. Hisoblash yoki Buyurtmalar bo‘limidan PDF yarating.
+            </div>
+            <div v-else-if="!filteredArchive.length" class="empty">Qidiruv bo‘yicha PDF topilmadi.</div>
+            <div v-for="entry in filteredArchive" :key="entry.id" class="history-row">
+              <div style="min-width: 0; overflow-wrap: anywhere;">
+                <strong>{{ entry.orderName }}</strong>
+                <small>{{ entry.reportType === 'client' ? 'Mijoz uchun PDF' : 'Ishlab chiqarish PDF' }} ·
+                  {{ new Date(entry.createdAt).toLocaleString('uz-UZ') }}</small>
+                <small>{{ entry.filename }}</small>
+                <small>{{ (entry.size / 1024).toFixed(1) }} KB</small>
+              </div>
+              <div class="history-actions">
+                <button class="btn secondary small" @click="openArchivedPDF(entry)">Ochish</button>
+                <button class="btn secondary small" @click="shareArchivedPDF(entry)">Ulashish</button>
+                <button class="btn secondary small" @click="downloadArchivedPDF(entry)">Yuklab olish</button>
+                <button class="btn danger small" @click="deleteArchivedPDF(entry)">O‘chirish</button>
+              </div>
+            </div>
+          </section>
+        </template>
+
         <!-- TEXNIK MA’LUMOTLAR -->
         <template v-else>
           <div class="page-heading">
@@ -1165,6 +1384,11 @@ const totalSaved = computed(() => saved.value.length)
       >
         <span>☷</span>
         Buyurtmalar
+      </button>
+
+      <button :class="{ active: view === 'archive' }" @click="showArchive">
+        <span>▣</span>
+        PDF arxivi
       </button>
 
       <button
